@@ -2,10 +2,11 @@
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATASET_DIR = PROJECT_ROOT / "os_dataset"
+PART_ROOT = Path(__file__).resolve().parent.parent      # vector-db/
+REPO_ROOT = PART_ROOT.parent                            # 모노레포 루트
+DATASET_DIR = REPO_ROOT / "os_dataset"                  # 데이터셋은 레포 루트에 배치 (공용)
 DOCUMENTS_DIR = DATASET_DIR / "documents"
-DOCS_OUT_DIR = PROJECT_ROOT / "docs"
+DOCS_OUT_DIR = PART_ROOT / "docs"
 
 DB_DSN = os.environ.get(
     "COMPANYX_DSN",

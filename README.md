@@ -1,96 +1,55 @@
-# Company-X 벡터 검색 파트 (PostgreSQL + pgvector)
+# MCP 기반 지능형 AI 검색 시스템
 
-2026 오픈소스 개발자대회 지정과제 — MCP 기반 지능형 AI 검색 시스템의
-**벡터 데이터베이스 파트**: 문서 임베딩·저장·의미 검색.
+> 2026 오픈소스 개발자대회 지정과제 — 가상 기업 Company-X 운영 데이터에 대해
+> 소형 LLM(Gemma 3 4B ~ Qwen 2.5 KO 7B)이 3종 MCP 도구로 답하는 검색 시스템.
 
-## 구성
+## 전체 아키텍처
 
-```
-osscontest/
-├── docker-compose.yml          # PostgreSQL 16 + pgvector
-├── initdb/                     # DB 초기화 (확장 → 데이터셋 DDL/데이터 → 벡터 셋업)
-│   ├── 00-extensions.sql       #   vector, pg_trgm
-│   └── 03-vector-setup.sql     #   1024차원 조정, HNSW 인덱스, 검색 SQL 함수
-├── os_dataset/                 # 대회 제공 데이터셋 (수정하지 않음)
-├── pipeline/
-│   ├── config.py               # DSN·모델·청킹 파라미터 (환경변수로 재정의 가능)
-│   ├── chunking.py             # Markdown 청킹 (+ 통계 출력 CLI)
-│   ├── embedding.py            # Ollama /api/embed 클라이언트 (배치·재시도)
-│   ├── load.py                 # 적재 파이프라인 (멱등: TRUNCATE 후 재적재)
-│   ├── search.py               # 벡터/하이브리드 검색 API + CLI
-│   ├── evaluate.py             # 10문항 자체 평가 → docs/evaluation.md 생성
-│   ├── router_prototype.py     # (선택) 임베딩 유사도 기반 도구 라우터
-│   └── mcp_server.py           # vector_search MCP 서버 (FastMCP, stdio)
-├── .mcp.json                   # Claude Code용 MCP 서버 등록
-└── docs/
-    ├── vector-search-contract.md  # MCP 도구 계약 (팀 인터페이스)
-    ├── design.md                  # 설계 근거
-    └── evaluation.md              # 평가 결과 (evaluate.py가 생성)
+```mermaid
+flowchart LR
+    U[사용자 질문] --> R["③ 라우터<br/>(규칙 기반 도구 선택)"]
+    R -->|정형 데이터 질의| SQL["② vector/nl2sql/graph<br/>MCP 서버 — nl2sql"]
+    R -->|비정형 문서 질의| VS["② MCP 서버 — vector_search"]
+    R -->|관계 탐색| KG["② MCP 서버 — knowledge_graph"]
+    VS --> DB[("① 벡터 DB<br/>PostgreSQL + pgvector")]
+    SQL --> DB
+    KG --> G[/"지식 그래프 JSON"/]
+    SQL & VS & KG --> A["④ Ollama 소형 LLM<br/>에이전트"]
+    A --> U2[답변]
 ```
 
-## 사전 요구사항
+## 파트 구성
 
-- Docker (Desktop)
-- Ollama — 임베딩 모델: `ollama pull bge-m3`
-- Python 3.11+ — `pip install -r requirements.txt`
-- **대회 제공 데이터셋**: 라이선스(대회 참가 목적 한정) 때문에 저장소에 포함하지 않음.
-  `companyx-dataset-v1.0.zip`을 압축 해제해 프로젝트 루트에 `os_dataset/` 이름으로 배치할 것:
+| 디렉토리 | 파트 | 상태 |
+|----------|------|------|
+| [`vector-db/`](vector-db/) | ① 벡터 DB — 임베딩·저장·하이브리드 검색 + `vector_search` 도구 계약/참조 MCP 서버 | ✅ 완료 (자체 평가 top-3 적중률 100%) |
+| [`mcp-server/`](mcp-server/) | ② MCP 서버 — vector_search·NL2SQL·knowledge_graph 3종 도구 | 🚧 작업 예정 |
+| [`router/`](router/) | ③ 규칙 기반 도구 자동 선택 라우터 | 🚧 작업 예정 |
+| [`agent/`](agent/) | ④ Ollama 소형 LLM 에이전트 연동 | 🚧 작업 예정 |
 
-  ```
-  osscontest/
-  └── os_dataset/
-      ├── README.md
-      ├── sql/            # 01-schema.sql, 02-data.sql, erd.md
-      ├── documents/      # DOC-001.md ~ DOC-040.md, index.json
-      ├── graph/          # nodes.json, edges.json, schema.md
-      └── questions.json
-  ```
+공용 리소스(레포 루트):
 
-## 실행 순서
+- `docker-compose.yml` — PostgreSQL 16 + pgvector. 모든 파트가 같은 DB를 사용
+- `os_dataset/` — 대회 제공 데이터셋. **라이선스상 git에 포함하지 않음** —
+  `companyx-dataset-v1.0.zip`을 풀어 이 이름으로 루트에 배치 (구조는 `vector-db/README.md` 참고)
+- `.mcp.json` — Claude Code용 MCP 서버 등록
+
+## 빠른 시작
 
 ```bash
-# 1. DB 기동 (초기화 스크립트가 스키마·데이터셋 적재까지 자동 수행)
-docker compose up -d --wait
-
-# 2. 적재 확인 (8개 테이블 행 수)
-docker exec companyx-db psql -U companyx -d companyx -c \
-  "SELECT 'employees' t, count(*) FROM employees UNION ALL SELECT 'sales', count(*) FROM sales;"
-
-# 3. 문서 청킹 → 임베딩 → document_chunks 적재 (재실행 안전)
-cd pipeline
-python load.py          # Windows: py -3.12 load.py (PYTHONUTF8=1 권장)
-
-# 4. 검색 테스트
-python search.py "SSL 인증서 관련 장애가 있었어?" --mode hybrid
-python search.py "백업 정책 알려줘" --doc-type 기술문서 --top-k 3
-
-# 5. 자체 평가 (10문항, 벡터 vs 하이브리드 → docs/evaluation.md)
-python evaluate.py
-
-# 6. (선택) 라우터 프로토타입 정확도 측정 (30문항)
-python router_prototype.py
+# 0. 데이터셋을 루트에 os_dataset/ 으로 배치 (위 참고)
+docker compose up -d --wait                    # 1. 공용 DB 기동 + 데이터셋 자동 적재
+pip install -r vector-db/requirements.txt      # 2. 파이썬 의존성
+python vector-db/pipeline/load.py              # 3. 문서 임베딩 적재 (Ollama bge-m3 필요)
+python vector-db/pipeline/search.py "SSL 인증서 관련 장애가 있었어?"   # 4. 검색 확인
 ```
 
-## MCP 서버 (vector_search 도구)
+상세 실행·평가 방법은 각 파트의 README를 참고.
 
-`pipeline/mcp_server.py`는 계약(docs/vector-search-contract.md)대로 `vector_search`
-도구 하나를 노출하는 최소 MCP 서버다(stdio, FastMCP). 사전 요구사항 추가:
-`pip install mcp`, DB 컨테이너와 Ollama 실행 상태.
+## 팀 인터페이스
 
-- **Claude Code**: 프로젝트 루트에 `.mcp.json`이 있어 이 디렉토리에서 열면 자동 인식됨
-- **Claude Desktop**: `claude_desktop_config.json`의 `mcpServers`에 `.mcp.json`과
-  동일한 항목(`command: py`, `args: ["-3.12", "<절대경로>/pipeline/mcp_server.py"]`)을 추가
-- 수동 실행 테스트: `py -3.12 pipeline/mcp_server.py` (stdio라 대화형 출력은 없음)
-
-Windows PowerShell에서 한글 출력이 깨지면: `$env:PYTHONUTF8 = "1"` 설정 후 실행.
-
-## 핵심 설계 요약 (상세: [docs/design.md](docs/design.md))
-
-- **임베딩**: Ollama `bge-m3` 1024차원 — 한국어 retrieval 성능 기준 선정.
-  원본 스키마의 `vector(768)`은 초기화 스크립트에서 ALTER (데이터셋 파일 무수정)
-- **청킹**: 헤딩 분할 → 400토큰 병합 → 500토큰 초과 시 overlap 50토큰 재분할
-- **인덱스**: HNSW(cosine) — 멱등 재적재 흐름과 호환(증분 구축) + 높은 recall
-- **하이브리드 검색**: 벡터 + pg_trgm 키워드(한국어에 tsvector 형태소 분석이 없어
-  trigram 채택)를 RRF(k=60)로 병합 — SSL·제품명 등 정확 키워드 질의 보완
-- **MCP 계약**: [docs/vector-search-contract.md](docs/vector-search-contract.md) —
-  소형 LLM(4B~7B) 컨텍스트를 고려해 top_k ≤ 10, 청크 ≤ 500토큰 강제
+- **`vector_search` 도구 계약**: [`vector-db/docs/vector-search-contract.md`](vector-db/docs/vector-search-contract.md)
+  — MCP 서버 파트는 이 명세대로 도구를 노출하면 됨 (참조 구현: `vector-db/pipeline/mcp_server.py`)
+- **라우터 보조 자료**: 임베딩 유사도 분류 프로토타입 `vector-db/pipeline/router_prototype.py`
+  (30문항 76% — 규칙 기반의 폴백으로 제안)
+- **평가셋**: `os_dataset/questions.json` (도구별 10문항, 총 30문항)

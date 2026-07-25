@@ -11,10 +11,10 @@ services:
     volumes:
       - companyx-data:/var/lib/postgresql/data
       # 실행 순서: 00(확장) → 01(데이터셋 스키마) → 02(데이터셋 데이터) → 03(벡터 검색 셋업)
-      - ./initdb/00-extensions.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
+      - ./vector-db/initdb/00-extensions.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
       - ./os_dataset/sql/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./os_dataset/sql/02-data.sql:/docker-entrypoint-initdb.d/02-data.sql:ro
-      - ./initdb/03-vector-setup.sql:/docker-entrypoint-initdb.d/03-vector-setup.sql:ro
+      - ./vector-db/initdb/03-vector-setup.sql:/docker-entrypoint-initdb.d/03-vector-setup.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U companyx -d companyx"]
       interval: 5s
