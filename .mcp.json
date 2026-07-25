@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "companyx-vector-search": {
+      "command": "py",
+      "args": ["-3.12", "pipeline/mcp_server.py"],
+      "env": {
+        "PYTHONUTF8": "1"
+      }
+    }
+  }
+}
