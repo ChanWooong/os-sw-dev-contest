@@ -8,15 +8,23 @@
 ```mermaid
 flowchart LR
     U[사용자 질문] --> R["③ 라우터<br/>(규칙 기반 도구 선택)"]
-    R -->|정형 데이터 질의| SQL["② vector/nl2sql/graph<br/>MCP 서버 — nl2sql"]
+    R -->|정형 데이터 질의| SQL["② MCP 서버 — nl2sql"]
     R -->|비정형 문서 질의| VS["② MCP 서버 — vector_search"]
     R -->|관계 탐색| KG["② MCP 서버 — knowledge_graph"]
-    VS --> DB[("① 벡터 DB<br/>PostgreSQL + pgvector")]
-    SQL --> DB
-    KG --> G[/"지식 그래프 JSON"/]
+    subgraph PG["공용 PostgreSQL (docker-compose)"]
+        T[("정형 8개 테이블<br/>sales, contracts, …")]
+        C[("document_chunks<br/>+ pgvector 임베딩 — ① 파트")]
+    end
+    SQL -->|일반 SQL — 벡터 무관| T
+    VS -->|코사인 유사도 + 키워드 RRF| C
+    KG --> G[/"지식 그래프 JSON<br/>(nodes/edges)"/]
     SQL & VS & KG --> A["④ Ollama 소형 LLM<br/>에이전트"]
     A --> U2[답변]
 ```
+
+> DB 인스턴스는 하나지만 역할이 나뉜다: **nl2sql은 정형 테이블을 일반 SQL로 조회**하며
+> 벡터단을 전혀 거치지 않고, pgvector(벡터 타입/인덱스 확장)는 `document_chunks`를 쓰는
+> vector_search에만 관여한다.
 
 ## 파트 구성
 
