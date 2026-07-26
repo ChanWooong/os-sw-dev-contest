@@ -14,8 +14,8 @@ DB_DSN = os.environ.get(
 )
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-m3")
-EMBED_DIM = int(os.environ.get("EMBED_DIM", "1024"))
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "embeddinggemma:300m")
+EMBED_DIM = int(os.environ.get("EMBED_DIM", "768"))
 EMBED_BATCH_SIZE = 16
 
 # 청킹 파라미터 (토큰 추정 기준, 근거: docs/design.md)

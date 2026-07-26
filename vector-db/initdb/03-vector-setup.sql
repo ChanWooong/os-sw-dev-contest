@@ -5,7 +5,7 @@
 
 -- [차원 조정] 데이터셋 원본은 vector(768)이나, 임베딩 모델로 한국어 성능이
 -- 검증된 bge-m3(1024차원)를 채택하여 컬럼 차원을 맞춘다. (근거: docs/design.md)
-ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector(1024);
+ALTER TABLE document_chunks ALTER COLUMN embedding TYPE vector(768);
 
 -- [인덱스] HNSW 채택. IVFFlat은 적재된 데이터로 사전 학습(리스트 클러스터링)이
 -- 필요해 빈 테이블에 만들 수 없고, 재적재 시 재학습이 필요하다. HNSW는 삽입 시
@@ -29,7 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc_type
 
 -- 1) 순수 벡터 검색 (코사인 유사도)
 CREATE OR REPLACE FUNCTION vector_search(
-    query_embedding vector(1024),
+    query_embedding vector(768),
     top_k           int  DEFAULT 5,
     filter_doc_type text DEFAULT NULL   -- '장애보고'|'기술문서'|'회의록'|'제안서'
 )
@@ -61,7 +61,7 @@ $$;
 --    정렬은 RRF 점수로 한다.
 CREATE OR REPLACE FUNCTION hybrid_search(
     query_text      text,
-    query_embedding vector(1024),
+    query_embedding vector(768),
     top_k           int  DEFAULT 5,
     filter_doc_type text DEFAULT NULL,
     rrf_k           int  DEFAULT 60,     -- RRF 표준 상수
