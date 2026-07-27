@@ -1,0 +1,2 @@
+# knowledge_graph 도구는 그래프 JSON만 읽으므로 DB·임베딩 의존성이 없다.
+mcp>=1.0
