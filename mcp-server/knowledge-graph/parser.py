@@ -15,28 +15,48 @@ from dataclasses import dataclass, field
 from graph import REL_ENDPOINTS, KnowledgeGraph, Node
 
 # ── 관계 키워드 ─────────────────────────────────────────────────────────────
-# 순서가 곧 우선순위. 더 구체적인 표현("팀장")을 넓은 표현("담당")보다 앞에 둔다.
-RELATION_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("HEAD_IS", ("팀장", "부서장", "본부장", "수장", "책임자")),
-    ("BELONGS_TO", ("소속", "속한", "속해", "몸담")),
-    ("LEADS", ("이끄는", "이끌", "리드하는", "총괄", "맡고 있는", "맡은")),
-    ("MANAGES_ACCOUNT", ("담당", "관리하는", "어카운트")),
-    ("REPORTED_ISSUE", ("기술 지원", "기술지원", "이슈", "장애", "클레임", "불만", "문제를")),
-    ("USES", ("사용", "쓰는", "쓰고", "이용", "도입")),
+# `(후보 관계들, 키워드들)`. 표 순서가 곧 우선순위 — 구체적 표현("팀장")을
+# 넓은 표현("담당")보다 앞에 둔다.
+#
+# 후보가 여럿인 항목은 맥락에 따라 관계가 갈리는 표현이다. "이끄는"은 부서를 이끌면
+# HEAD_IS, 프로젝트를 이끌면 LEADS, 고객을 맡으면 MANAGES_ACCOUNT다. 최종 선택은
+# 출발 개체·대상 유형과 대조하는 `_resolve_relation()`이 한다.
+RELATION_KEYWORDS: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    (("HEAD_IS",), ("팀장", "부서장", "본부장", "수장", "책임자")),
+    (("BELONGS_TO",), ("소속", "속한", "속해", "일하는", "근무", "재직", "몸담")),
+    (("HEAD_IS", "LEADS"), ("리더",)),
+    (("LEADS", "MANAGES_ACCOUNT", "HEAD_IS"),
+     ("이끄는", "이끌", "리드", "총괄", "맡고 있는", "맡은", "맡는")),
+    (("MANAGES_ACCOUNT",), ("담당", "관리하는", "어카운트")),
+    (("REPORTED_ISSUE",),
+     ("기술 지원", "기술지원", "이슈", "장애", "클레임", "불만", "고장", "문제")),
+    (("USES",), ("사용", "쓰는", "쓰고", "쓰던", "이용", "도입", "계약", "구독")),
 ]
 
 # ── 노드 유형 키워드 ────────────────────────────────────────────────────────
 TYPE_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("employee", ("엔지니어", "담당자", "직원", "사원", "임직원", "누구")),
+    ("employee", ("엔지니어", "담당자", "직원", "사원", "임직원", "사람", "인원", "멤버", "누구")),
     ("product", ("제품", "솔루션", "상품")),
-    ("client", ("고객사", "고객", "거래처")),
+    ("client", ("고객사", "고객", "거래처", "회사")),
     ("project", ("프로젝트",)),
     ("department", ("부서", "팀")),
 ]
 
 # ── 랭킹 트리거 ─────────────────────────────────────────────────────────────
-RANK_DESC = ("가장 많은", "가장 많이", "제일 많은", "최다", "가장 큰", "많은 순")
-RANK_ASC = ("가장 적은", "제일 적은", "가장 작은", "최소", "적은 순")
+RANK_DESC = ("가장 많은", "가장 많이", "가장 많게", "제일 많은", "제일 많이", "가장 잦은",
+             "제일 잦은", "가장 자주", "가장 높은", "제일 높은", "가장 큰", "제일 큰",
+             "최다", "최고", "많은 순", "높은 순")
+RANK_ASC = ("가장 적은", "가장 적게", "제일 적은", "제일 적게", "가장 작은", "제일 작은",
+            "가장 낮은", "제일 낮은", "가장 드문", "최소", "적은 순", "낮은 순")
+
+# ── 간선(계약) 상태 표현 ────────────────────────────────────────────────────
+# USES 간선은 계약이라 상태를 갖는다. 노드 속성값과 겹치지 않는 낱말만 골랐다 —
+# "완료/종료"는 프로젝트 상태와 충돌하므로 여기 넣지 않는다.
+CONTRACT_STATUS_WORDS: dict[str, str] = {
+    "해지": "cancelled", "해약": "cancelled", "취소": "cancelled", "만료": "completed",
+}
+# 상태를 가리지 말라는 표현 — 해지분까지 포함해 보고 싶을 때
+ALL_EDGES_WORDS = ("전체", "모든", "이력", "과거", "역대", "지금까지")
 
 # ── 영문 속성값의 한국어 별칭 ───────────────────────────────────────────────
 # 그래프 속성값이 한국어인 것(region "서울", position "부장", industry "금융" 등)은
@@ -58,6 +78,11 @@ STOPWORDS = frozenset({
     "알려줘", "보여줘", "알려", "보여", "해줘", "줘", "있는", "하는", "되는", "있나",
     "중인", "중에", "중", "대해", "대한", "그리고", "또는", "지금", "현재", "이번",
     "이야", "인가", "인가요", "일까", "인지", "무슨", "좀", "쪽", "관계", "연결",
+    # 랭킹·수식 표현의 잔여물. 이것들이 "그래프에 없는 개체"로 오인되면
+    # 답이 있는데도 entity_not_found가 나므로 반드시 걸러야 한다.
+    "가장", "제일", "많은", "많이", "많게", "적은", "적게", "높은", "낮은", "큰", "작은",
+    "잦은", "자주", "드문", "순서", "순", "상위", "하위", "이력", "과거", "역대",
+    "단계", "상태", "기준", "여부", "때", "곳들", "것", "거", "게",
 })
 
 # 토큰 끝에 붙는 조사 — 개체 후보 판정 전에 떼어낸다.
@@ -82,6 +107,8 @@ class Slots:
     relation: str | None = None
     target_type: str | None = None
     node_filter: dict = field(default_factory=dict)
+    edge_filter: dict | None = None         # 간선(계약·티켓) 조건. 명시됐을 때만 채워진다
+    all_edges: bool = False                 # 상태를 가리지 말라고 명시했는가
     rank: str | None = None                 # None | "desc" | "asc"
     top_k: int | None = None
     unresolved_term: str | None = None      # 개체로 보이지만 그래프에 없는 낱말
@@ -111,14 +138,22 @@ def parse(question: str, graph: KnowledgeGraph) -> tuple[Slots, Node | None]:
         slots.top_k, slots.rank = int(m.group(1)), slots.rank or "desc"
         text = text.replace(m.group(0), " ")
 
-    # 3) 속성 필터
+    # 3) 간선(계약) 조건 → 노드 속성 필터 순
+    for word, status in CONTRACT_STATUS_WORDS.items():
+        if word in text:
+            slots.edge_filter, text = {"status": status}, text.replace(word, " ")
+            break
+    slots.all_edges = any(w in text for w in ALL_EDGES_WORDS)
     slots.node_filter, text = _extract_filters(text, graph)
 
-    # 4) 관계
-    for relation, words in RELATION_KEYWORDS:
+    # 4) 관계 후보 — 확정은 대상 유형까지 본 뒤 6)에서 한다.
+    #    언급된 유형은 관계어를 지우기 전에 모아둔다("팀장"이 지워지면 단서가 사라진다).
+    mentioned = _mentioned_types(text)
+    candidates: tuple[str, ...] = ()
+    for relations, words in RELATION_KEYWORDS:
         hit = next((w for w in words if w in text), None)
         if hit:
-            slots.relation, text = relation, text.replace(hit, " ")
+            candidates, text = relations, text.replace(hit, " ")
             break
 
     # 5) 대상 유형 — 문장 뒤쪽에 나온 것이 묻는 대상이다(한국어 어순).
@@ -140,11 +175,49 @@ def parse(question: str, graph: KnowledgeGraph) -> tuple[Slots, Node | None]:
         for w in words:
             text = text.replace(w, " ")
 
-    # 6) 남은 낱말 중 개체처럼 보이는 것 — 개체를 못 찾았을 때의 진단용
+    # 6) 관계 확정 — 후보가 여럿이면 출발 개체·대상 유형과 맞는 것을 고른다
+    slots.relation = _resolve_relation(candidates, anchor_type, slots.target_type, mentioned)
+
+    # 7) 남은 낱말 중 개체처럼 보이는 것 — 개체를 못 찾았을 때의 진단용
     if anchor is None:
         slots.unresolved_term = _leftover_entity(text)
 
     return slots, anchor
+
+
+def _mentioned_types(text: str) -> set[str]:
+    """질문에 등장한 노드 유형 전부. 관계 후보를 좁히는 단서로 쓴다."""
+    return {t for t, words in TYPE_KEYWORDS if any(w in text for w in words)}
+
+
+def _resolve_relation(
+    candidates: tuple[str, ...], anchor_type: str | None, target_type: str | None,
+    mentioned: set[str],
+) -> str | None:
+    """후보 관계 중 문맥에 맞는 하나를 고른다.
+
+    관계마다 양 끝점 유형이 정해져 있으므로(REL_ENDPOINTS), 출발 개체 유형과
+    대상 유형이 그 끝점에 들어맞는지로 거른다. 남은 후보 중에서는 질문에 언급된
+    유형을 더 많이 덮는 쪽을 고른다 — "고객을 맡은 직원"은 client·employee를 모두
+    덮는 MANAGES_ACCOUNT가, "프로젝트를 이끄는 직원"은 LEADS가 이긴다.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def score(relation: str) -> int:
+        endpoints = set(REL_ENDPOINTS[relation])
+        if anchor_type and anchor_type not in endpoints:
+            return -1
+        if target_type and target_type not in endpoints:
+            return -1
+        return len(endpoints & mentioned)
+
+    best = max(candidates, key=score)
+    # 어느 후보도 문맥과 맞지 않으면 관계를 비운다. 잘못 고정하면 결과가
+    # 빈 배열이 되지만, 비워두면 이웃 전체를 훑어 답을 포함할 여지가 남는다.
+    return best if score(best) >= 0 else None
 
 
 def _extract_entity(text: str, graph: KnowledgeGraph) -> tuple[Node | None, str]:
