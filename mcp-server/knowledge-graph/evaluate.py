@@ -19,15 +19,29 @@ from tool import knowledge_graph_query
 NODES = {n["id"]: n for n in json.loads(NODES_PATH.read_text(encoding="utf-8"))}
 EDGES = json.loads(EDGES_PATH.read_text(encoding="utf-8"))
 
+ACTIVE = {"status": "active"}   # 유효 계약만 — USES 간선 조건
+
 
 def _id_of(name: str) -> str:
     return next(n["id"] for n in NODES.values() if n["name"] == name)
 
 
-def _linked(node_id: str, relation: str, *, reverse: bool = False) -> set[str]:
-    """`node_id`에 `relation`으로 직접 연결된 반대쪽 노드 id 집합."""
+def _linked(
+    node_id: str, relation: str, *, reverse: bool = False, where: dict | None = None
+) -> set[str]:
+    """`node_id`에 `relation`으로 직접 연결된 반대쪽 노드 id 집합.
+
+    `where`로 간선 속성 조건을 걸 수 있다 — "사용 중인 제품"은 유효 계약(active)만
+    세야 하므로, 계약 상태를 무시하면 정답셋 자체가 틀린다.
+    """
     src, dst = ("target", "source") if reverse else ("source", "target")
-    return {e[dst] for e in EDGES if e["relation"] == relation and e[src] == node_id}
+    return {
+        e[dst]
+        for e in EDGES
+        if e["relation"] == relation
+        and e[src] == node_id
+        and all((e.get("properties") or {}).get(k) == v for k, v in (where or {}).items())
+    }
 
 
 def _degree_top(relation: str, node_type: str) -> set[str]:
@@ -66,8 +80,12 @@ def _expected() -> dict[str, dict]:
     }
 
     return {
-        "Client-A가 사용 중인 제품 목록은?": {"kind": "set", "ids": _linked(client_a, "USES")},
-        "Product-C1을 사용하는 고객사는 어디야?": {"kind": "set", "ids": _linked(product_c1, "USES", reverse=True)},
+        # "사용 중"이므로 해지·종료된 계약은 제외한다. Product-C1은 6개 고객사와
+        # USES 간선이 있지만 그중 Client-T는 completed라 실제 정답은 5개다.
+        "Client-A가 사용 중인 제품 목록은?":
+            {"kind": "set", "ids": _linked(client_a, "USES", where=ACTIVE)},
+        "Product-C1을 사용하는 고객사는 어디야?":
+            {"kind": "set", "ids": _linked(product_c1, "USES", reverse=True, where=ACTIVE)},
         "클라우드사업부 소속 직원들은 누구야?": {"kind": "set", "ids": _linked(cloud_dept, "BELONGS_TO", reverse=True)},
         # 데이터셋 힌트는 client_2를 가리키지만 '서울물산'이라는 이름의 노드는 그래프에 없다.
         # 없는 개체를 지어내지 않고 명시적 오류를 내는 것이 올바른 동작이다.

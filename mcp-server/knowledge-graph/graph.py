@@ -32,6 +32,14 @@ REL_ENDPOINTS: dict[str, tuple[str, str]] = {
 # 과도하게 넓어지므로, 질문이 이슈를 직접 물을 때만 탐색한다.
 EVENT_RELATIONS = frozenset({"REPORTED_ISSUE"})
 
+# 간선 자체가 속성을 갖는 관계. USES는 계약이라 상태가 있고(active/cancelled/completed),
+# REPORTED_ISSUE는 티켓이라 심각도가 있다. 노드가 아니라 "관계"의 조건이므로
+# 노드 속성 필터(node_filter)와 분리해 다룬다.
+EDGE_FILTERABLE: dict[str, frozenset[str]] = {
+    "USES": frozenset({"status"}),
+    "REPORTED_ISSUE": frozenset({"priority"}),
+}
+
 _PRIORITY_RANK = {"critical": 3, "high": 2, "medium": 1, "low": 0}
 
 
@@ -130,6 +138,7 @@ class KnowledgeGraph:
         relation: str | None = None,
         target_type: str | None = None,
         node_filter: dict | None = None,
+        edge_filter: dict | None = None,
         top_k: int = DEFAULT_TOP_K,
     ) -> dict:
         """`anchor`에서 출발해 `target_type` 노드를 찾는다.
@@ -137,16 +146,18 @@ class KnowledgeGraph:
         1홉에서 찾으면 거기서 멈추고, 없을 때만 2홉으로 넓힌다
         (예: 제품 → 사용 고객 → 그 고객의 프로젝트).
         """
-        hop1 = self._expand(anchor.id, relation=relation, allow_event=True)
+        hop1, excluded = self._expand(anchor.id, relation, allow_event=True, edge_filter=edge_filter)
         matches = self._select(hop1, target_type, node_filter)
         hops = 1
 
         if not matches and target_type is not None:
-            matches = self._select(self._expand_two_hop(anchor, relation), target_type, node_filter)
+            two_hop, excluded_2 = self._expand_two_hop(anchor, relation, edge_filter)
+            matches = self._select(two_hop, target_type, node_filter)
+            excluded += excluded_2
             hops = 2
 
         rows = self._rows(matches, top_k)
-        return {
+        result = {
             "mode": "neighbors",
             "anchor": anchor.brief(),
             "relation": relation,
@@ -157,16 +168,36 @@ class KnowledgeGraph:
             "truncated": len(matches) > len(rows),
             "results": rows,
         }
+        # 조건에 걸러진 관계가 있으면 숨기지 않고 알린다. 예를 들어 "사용 중인 제품"은
+        # 해지된 계약을 제외하는데, 몇 건을 뺐는지 모르면 LLM이 "제품이 없다"와
+        # "지금 쓰는 게 없을 뿐"을 구분해 설명할 수 없다.
+        if edge_filter:
+            result["edge_filter"] = edge_filter
+            if excluded:
+                result["excluded_by_edge_filter"] = excluded
+        return result
 
     def _expand(
-        self, node_id: str, relation: str | None, allow_event: bool, via: str | None = None
-    ) -> dict[str, dict]:
-        """1홉 이웃 수집. 같은 이웃으로 가는 평행 간선은 하나로 합친다."""
+        self,
+        node_id: str,
+        relation: str | None,
+        allow_event: bool,
+        via: str | None = None,
+        edge_filter: dict | None = None,
+    ) -> tuple[dict[str, dict], int]:
+        """1홉 이웃 수집. 같은 이웃으로 가는 평행 간선은 하나로 합친다.
+
+        `(이웃, 간선 조건에 걸러진 건수)`를 돌려준다.
+        """
         found: dict[str, dict] = {}
+        excluded = 0
         for neighbor_id, rel, direction, props in self._adj[node_id]:
             if relation is not None and rel != relation:
                 continue
             if relation is None and not allow_event and rel in EVENT_RELATIONS:
+                continue
+            if edge_filter and not _edge_matches(rel, props, edge_filter):
+                excluded += 1
                 continue
             entry = found.setdefault(
                 neighbor_id,
@@ -175,22 +206,29 @@ class KnowledgeGraph:
             )
             entry["link_count"] += 1
             entry["edges"].append((rel, props))
-        return found
+        return found, excluded
 
-    def _expand_two_hop(self, anchor: Node, relation: str | None) -> dict[str, dict]:
+    def _expand_two_hop(
+        self, anchor: Node, relation: str | None, edge_filter: dict | None = None
+    ) -> tuple[dict[str, dict], int]:
         """2홉 탐색. 중간 간선은 구조적 관계만 사용한다(EVENT_RELATIONS 주석 참고)."""
         result: dict[str, dict] = {}
+        excluded = 0
         # 1홉은 관계 필터를 걸지 않는다 — 관계 슬롯은 보통 최종 도달 관계를 가리키므로
         # 중간 경유 관계까지 제한하면 경로가 끊긴다.
-        for mid in self._expand(anchor.id, relation=None, allow_event=False).values():
+        mids, hop1_excluded = self._expand(anchor.id, None, allow_event=False, edge_filter=edge_filter)
+        excluded += hop1_excluded
+        for mid in mids.values():
             mid_node: Node = mid["node"]
-            for far_id, entry in self._expand(
-                mid_node.id, relation=relation, allow_event=False, via=mid_node.name
-            ).items():
+            far, far_excluded = self._expand(
+                mid_node.id, relation, allow_event=False, via=mid_node.name, edge_filter=edge_filter
+            )
+            excluded += far_excluded
+            for far_id, entry in far.items():
                 if far_id == anchor.id or far_id in result:
                     continue
                 result[far_id] = entry
-        return result
+        return result, excluded
 
     # ── 탐색 2: 관계 차수 랭킹 ("가장 많은 ~") ──────────────────────────────
     def rank(
@@ -244,13 +282,18 @@ class KnowledgeGraph:
         relation: str,
         target_type: str,
         far_filter: dict | None = None,
+        edge_filter: dict | None = None,
         top_k: int = DEFAULT_TOP_K,
     ) -> dict:
         """"진행 중인 프로젝트를 이끄는 직원"처럼 시작 개체 없이
         관계 반대쪽 끝점의 속성으로 거르는 질의."""
         collected: dict[str, dict] = {}
+        excluded = 0
         for e in self.edges:
             if e.relation != relation:
+                continue
+            if edge_filter and not _edge_matches(e.relation, e.properties, edge_filter):
+                excluded += 1
                 continue
             src, tgt = self.nodes.get(e.source), self.nodes.get(e.target)
             if src is None or tgt is None:
@@ -272,7 +315,7 @@ class KnowledgeGraph:
             entry["edges"].append((relation, e.properties))
 
         rows = self._rows(collected, top_k)
-        return {
+        result = {
             "mode": "scan",
             "relation": relation,
             "target_type": target_type,
@@ -282,6 +325,11 @@ class KnowledgeGraph:
             "truncated": len(collected) > len(rows),
             "results": rows,
         }
+        if edge_filter:
+            result["edge_filter"] = edge_filter
+            if excluded:
+                result["excluded_by_edge_filter"] = excluded
+        return result
 
     # ── 결과 정리 ───────────────────────────────────────────────────────────
     def _select(
@@ -330,6 +378,18 @@ class KnowledgeGraph:
 
 def _matches(node: Node, filters: dict) -> bool:
     return all(str(node.properties.get(k, "")).lower() == str(v).lower() for k, v in filters.items())
+
+
+def _edge_matches(relation: str, props: dict, filters: dict) -> bool:
+    """간선 조건 판정. 해당 관계에 없는 속성 조건은 무시한다 —
+    예를 들어 계약 상태 조건은 USES에만 걸리고 BELONGS_TO 탐색은 막지 않아야 한다."""
+    allowed = EDGE_FILTERABLE.get(relation, frozenset())
+    for key, value in filters.items():
+        if key not in allowed:
+            continue
+        if str(props.get(key, "")).lower() != str(value).lower():
+            return False
+    return True
 
 
 def _clamp(top_k: int) -> int:

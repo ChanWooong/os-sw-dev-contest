@@ -1,6 +1,6 @@
 # knowledge_graph 자체 평가 결과
 
-> 생성일: 2026-07-27 · `evaluate.py` 실행 결과
+> 생성일: 2026-08-01 · `evaluate.py` 실행 결과
 > 평가셋: `os_dataset/questions.json`의 knowledge_graph 10문항
 > 정답은 `nodes.json`/`edges.json`에서 도구와 **독립적으로** 재계산해 비교했다.
 
@@ -19,7 +19,7 @@
 | # | 질문 | 모드 | 결과 수 | 판정 | 비고 |
 |:-:|------|------|:------:|:----:|------|
 | 1 | Client-A가 사용 중인 제품 목록은? | `neighbors` | 2 | ✅ | 2건 일치 |
-| 2 | Product-C1을 사용하는 고객사는 어디야? | `neighbors` | 6 | ✅ | 6건 일치 |
+| 2 | Product-C1을 사용하는 고객사는 어디야? | `neighbors` | 5 | ✅ | 5건 일치 |
 | 3 | 클라우드사업부 소속 직원들은 누구야? | `neighbors` | 10 | ✅ | 10건 일치 |
 | 4 | 서울물산 담당 엔지니어는 누구야? | `entity_not_found` | 0 | ✅ | error=entity_not_found |
 | 5 | Product-D1 제품과 관련된 프로젝트는? | `neighbors` | 6 | ✅ | 6건 일치 |
