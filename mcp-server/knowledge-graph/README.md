@@ -9,15 +9,26 @@ DB도 임베딩 모델도 쓰지 않는다 — 이 폴더만 있으면 단독 �
 pip install -r requirements.txt
 python server.py                                    # MCP 서버 (stdio)
 python tool.py "Client-A가 사용 중인 제품 목록은?"    # CLI 확인
-python evaluate.py                                  # 자체 평가 (10문항)
+python evaluate.py                                  # 자체 평가 (공식 10문항)
+python evaluate_robustness.py                       # 견고성 평가 (바꿔 말한 20문항)
 python test_e2e.py                                  # MCP 프로토콜 E2E 확인
 ```
 
-## 자체 평가 결과
+## 평가 결과
 
-`os_dataset/questions.json`의 knowledge_graph 10문항 **10/10 통과**.
-정답은 `nodes.json`/`edges.json`에서 도구와 독립적으로 재계산해 비교했다
-(도구와 같은 코드로 정답을 만들면 동어반복이므로). 상세: [`docs/evaluation.md`](docs/evaluation.md).
+| 평가 | 문항 | 결과 |
+|------|:---:|------|
+| [`evaluate.py`](evaluate.py) — 공식 평가셋 | 10 | **10/10** |
+| [`evaluate_robustness.py`](evaluate_robustness.py) — 같은 의도를 바꿔 말한 질문 | 20 | **20/20** |
+| [`test_e2e.py`](test_e2e.py) — MCP 프로토콜 | 6 | 전부 통과 |
+
+정답은 `nodes.json`/`edges.json`에서 도구와 독립적으로 재계산해 비교한다
+(도구와 같은 코드로 정답을 만들면 동어반복이므로). 목록형은 노드 id 집합이
+**완전 일치**해야 통과한다. 상세: [`docs/evaluation.md`](docs/evaluation.md).
+
+공식 10문항은 파서를 만들 때 이미 보고 있던 문제라 통과해도 일반화 성능을 뜻하지
+않는다. 그래서 같은 의도를 다른 말로 묻는 견고성 평가를 따로 뒀다. 두 평가에
+쓰지 않은 새 질문 12개로 확인했을 때도 12/12였다.
 
 ## 도구 계약
 
@@ -71,6 +82,8 @@ python test_e2e.py                                  # MCP 프로토콜 E2E 확�
 | `count` / `returned` / `truncated` | int/int/bool | 전체 건수 / 반환 건수 / 상한 절삭 여부 |
 | `results` | array | 아래 항목들 |
 | `tied_top` | array | 1위가 여럿일 때만 (`rank` 모드) |
+| `edge_filter` | object | 간선 조건이 걸렸을 때만 (예: `{"status": "active"}`) |
+| `excluded_by_edge_filter` | int | 그 조건에 걸러진 관계 수 (0이면 생략) |
 
 `results[]`의 각 항목:
 
@@ -165,6 +178,18 @@ python test_e2e.py                                  # MCP 프로토콜 E2E 확�
    실제로 "가장 많은 고객을 담당하는 직원"은 4건으로 3명이 동점이라,
    한 명만 돌려주면 모델이 사실이 아닌 단정을 하게 된다.
 
+7. **"사용 중"은 유효 계약만 센다.** `USES` 간선 61건 중 19건(31%)이 해지·종료된
+   계약이다. 이를 구분하지 않으면 "지금 쓰는 제품"에 이미 끊긴 계약이 섞여 나온다
+   (30개 고객사 중 16개가 해당). 그래서 `USES`를 명시적으로 물으면 기본으로
+   `status=active`만 반환하고, 걸러낸 건수를 `excluded_by_edge_filter`로 함께 알린다.
+   "해지한 제품", "계약 전체"처럼 다르게 물으면 그에 맞춰 조건이 바뀐다.
+   반면 "관련된"처럼 넓게 물을 때는 과거 계약도 관계의 일부이므로 거르지 않는다.
+
+8. **애매한 관계어는 문맥으로 정한다.** "이끄는"은 부서를 이끌면 `HEAD_IS`,
+   프로젝트를 이끌면 `LEADS`, 고객을 맡으면 `MANAGES_ACCOUNT`다. 관계마다 양 끝점
+   유형이 정해져 있으므로, 출발 개체·대상 유형과 대조해 맞는 것을 고른다.
+   하나로 고정하면 "경영지원팀을 이끄는 사람"이 빈 결과가 된다.
+
 ## 통합 안내 (③ 라우터 · ④ 에이전트 담당자용)
 
 - **Python에서 직접 호출**: `from tool import knowledge_graph_query` →
@@ -188,6 +213,10 @@ python test_e2e.py                                  # MCP 프로토콜 E2E 확�
 - 평가 4번 문항("서울물산 담당 엔지니어")의 힌트는 `client_2`를 가리키지만, 배포된 그래프의
   고객사 이름은 `Client-A`~`Client-AD` 형식뿐이라 해당 노드가 존재하지 않는다.
   근거: `docs/evaluation.md`의 "4번 문항에 대하여".
-- 속성 필터는 노드 속성만 대상으로 한다. 간선 속성(`USES.status`, `REPORTED_ISSUE.priority`)은
-  결과에 표시는 되지만 필터 조건으로는 아직 쓰이지 않는다.
+- 간선 속성 필터는 엔진(`graph.py`의 `EDGE_FILTERABLE`)에 `USES.status`와
+  `REPORTED_ISSUE.priority` 둘 다 열려 있으나, 한국어 표현이 붙은 것은 계약 상태뿐이다.
+  "critical 이슈를 낸 고객사" 같은 심각도 조건은 `parser.py`에 낱말만 추가하면 동작한다.
 - 3홉 이상 경로 질의("A의 담당자가 맡은 다른 고객사의 프로젝트")는 지원하지 않는다.
+- 파서는 키워드 기반이라 표에 없는 표현은 잡지 못한다. 확장은 `parser.py` 상단 표에
+  항목을 추가하는 것으로 끝나며, 추가할 때마다 `evaluate_robustness.py`에 문항을
+  같이 넣어야 회귀를 잡을 수 있다.
