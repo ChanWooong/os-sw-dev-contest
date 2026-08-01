@@ -11,8 +11,8 @@
 """
 from __future__ import annotations
 
-from config import DEFAULT_TOP_K, MAX_TOP_K
-from graph import EDGE_FILTERABLE, REL_ENDPOINTS, EntityNotFound, get_graph
+from config import DEFAULT_TOP_K, MAX_HOPS, MAX_TOP_K
+from graph import EDGE_FILTERABLE, REL_ENDPOINTS, AmbiguousEntity, EntityNotFound, get_graph
 from parser import endpoints_ok, parse
 
 
@@ -52,7 +52,13 @@ def knowledge_graph_query(question: str, top_k: int = DEFAULT_TOP_K) -> dict:
             top_k=limit,
         )
     elif slots.rank and relation and slots.target_type and endpoints_ok(relation, slots.target_type):
-        result = graph.rank(relation, slots.target_type, ascending=slots.rank == "asc", top_k=limit)
+        result = graph.rank(
+            relation,
+            slots.target_type,
+            ascending=slots.rank == "asc",
+            edge_filter=edge_filter,
+            top_k=limit,
+        )
     elif slots.unresolved_term:
         return _entity_not_found(slots.unresolved_term, graph)
     elif relation and slots.target_type and endpoints_ok(relation, slots.target_type):
@@ -75,6 +81,11 @@ def knowledge_graph_query(question: str, top_k: int = DEFAULT_TOP_K) -> dict:
     result["question"] = question
     if not result["results"]:
         result["message"] = "조건에 맞는 관계를 찾지 못했습니다."
+        if result.get("mode") == "neighbors" and slots.target_type:
+            # 3홉 이상 떨어진 답에는 도달할 수 없다. 빈 결과를 "그런 관계가 없다"로
+            # 읽으면 LLM이 사실이 아닌 단정을 하므로 탐색 한계를 함께 밝힌다.
+            result["max_hops"] = MAX_HOPS
+            result["message"] += f" 이 도구는 최대 {MAX_HOPS}홉까지만 탐색합니다."
     return result
 
 
@@ -88,8 +99,21 @@ def _relation_owning(edge_filter: dict) -> str | None:
 
 
 def _entity_not_found(term: str, graph) -> dict:
+    """개체를 특정하지 못한 이유를 구분해 돌려준다.
+
+    이름이 여러 노드에 걸리는 것("재원" → 조재원·서재원·안재원·황재원)과
+    아예 없는 것은 다른 상황이다. 뭉뚱그리면 되물을 수 있는 질문까지 막힌다.
+    """
     try:
         graph.resolve(term)
+    except AmbiguousEntity as exc:
+        return _error(
+            "ambiguous_entity",
+            f"'{term}'에 해당하는 개체가 {len(exc.candidates)}개입니다. 어느 쪽인지 확인이 필요합니다.",
+            term=term,
+            candidates=exc.candidates,
+            hint="후보 중 하나의 전체 이름으로 다시 물어보세요.",
+        )
     except EntityNotFound as exc:
         suggestions = exc.suggestions
     else:
