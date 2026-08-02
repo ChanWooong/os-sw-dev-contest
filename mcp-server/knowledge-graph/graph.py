@@ -72,6 +72,20 @@ class EntityNotFound(LookupError):
         super().__init__(f"그래프에서 '{term}'을(를) 찾지 못했습니다.")
 
 
+class AmbiguousEntity(LookupError):
+    """이름이 여러 노드에 걸릴 때.
+
+    임의로 하나를 고르면 "없는 개체는 지어내지 않는다"는 원칙과 모순된다.
+    없는 개체는 거부하면서 애매한 개체는 추측하는 셈이기 때문이다.
+    후보를 돌려주고 호출자가 되묻게 한다.
+    """
+
+    def __init__(self, term: str, candidates: list[str]):
+        self.term = term
+        self.candidates = candidates
+        super().__init__(f"'{term}'에 해당하는 개체가 여럿입니다: {', '.join(candidates)}")
+
+
 class KnowledgeGraph:
     def __init__(self, nodes: list[Node], edges: list[Edge]) -> None:
         self.nodes = {n.id: n for n in nodes}
@@ -126,8 +140,7 @@ class KnowledgeGraph:
         if len(partial) == 1:
             return partial[0]
         if partial:
-            # 여러 개면 가장 짧은 이름(가장 구체적인 일치)을 고른다
-            return min(partial, key=lambda n: len(n.name))
+            raise AmbiguousEntity(term, sorted(n.name for n in partial))
 
         raise EntityNotFound(term, difflib.get_close_matches(term, self.all_names(), n=3, cutoff=0.6))
 
@@ -236,13 +249,23 @@ class KnowledgeGraph:
         relation: str,
         target_type: str,
         ascending: bool = False,
+        edge_filter: dict | None = None,
         top_k: int = DEFAULT_TOP_K,
     ) -> dict:
-        """`relation` 간선을 `target_type` 쪽 끝점 기준으로 집계해 순위를 낸다."""
+        """`relation` 간선을 `target_type` 쪽 끝점 기준으로 집계해 순위를 낸다.
+
+        `edge_filter`는 `neighbors`/`scan`과 **같은 조건**이 걸려야 한다. 모드마다
+        다르게 적용하면 "사용 중"의 뜻이 질문 형태에 따라 달라진다 — 실제로
+        전체 기준 1위는 Client-T 단독이지만 유효 계약만 세면 5개사 공동 1위다.
+        """
         counts: dict[str, int] = defaultdict(int)
         distinct: dict[str, set[str]] = defaultdict(set)
+        excluded = 0
         for e in self.edges:
             if e.relation != relation:
+                continue
+            if edge_filter and not _edge_matches(e.relation, e.properties, edge_filter):
+                excluded += 1
                 continue
             for near, far in ((e.source, e.target), (e.target, e.source)):
                 node = self.nodes.get(near)
@@ -274,6 +297,10 @@ class KnowledgeGraph:
             if len(tied) > 1:
                 result["tied_top"] = tied
                 result["tied_count"] = best
+        if edge_filter:
+            result["edge_filter"] = edge_filter
+            if excluded:
+                result["excluded_by_edge_filter"] = excluded
         return result
 
     # ── 탐색 3: 개체 없이 관계 전체 훑기 (조건부 목록) ──────────────────────

@@ -40,10 +40,12 @@ def _linked(node_id: str, relation: str, *, reverse: bool = False, where: dict |
     }
 
 
-def _degree_top(relation: str, node_type: str) -> set[str]:
+def _degree_top(relation: str, node_type: str, where: dict | None = None) -> set[str]:
     counts: collections.Counter[str] = collections.Counter()
     for e in EDGES:
         if e["relation"] != relation:
+            continue
+        if not all((e.get("properties") or {}).get(k) == v for k, v in (where or {}).items()):
             continue
         for endpoint in (e["source"], e["target"]):
             if NODES[endpoint]["type"] == node_type:
@@ -52,9 +54,24 @@ def _degree_top(relation: str, node_type: str) -> set[str]:
     return {nid for nid, cnt in counts.items() if cnt == best}
 
 
+def _two_hop_same_type(node_id: str, relation: str) -> set[str]:
+    """`node_id` → (relation) → 중간 노드 → (relation) → 같은 유형의 다른 노드."""
+    mids = {
+        e["source"] if e["target"] == node_id else e["target"]
+        for e in EDGES
+        if e["relation"] == relation and node_id in (e["source"], e["target"])
+    }
+    far = {
+        e["source"] if e["target"] in mids else e["target"]
+        for e in EDGES
+        if e["relation"] == relation and (e["source"] in mids or e["target"] in mids)
+    }
+    return {n for n in far if NODES[n]["type"] == NODES[node_id]["type"]} - {node_id}
+
+
 def _cases() -> list[tuple[str, str, set[str]]]:
     ca, pc1, pd1, ps1 = _id("Client-A"), _id("Product-C1"), _id("Product-D1"), _id("Product-S1")
-    cb, cc = _id("Client-B"), _id("Client-C")
+    cb = _id("Client-B")
     cloud, admin = _id("클라우드사업부"), _id("경영지원팀")
 
     d1_projects: set[str] = set()
@@ -86,26 +103,59 @@ def _cases() -> list[tuple[str, str, set[str]]]:
         ("Product-D1 관련 프로젝트 보여줘", "set", d1_projects),
         ("Product-S1에 문제 겪은 고객사", "set", _linked(ps1, "REPORTED_ISSUE", reverse=True)),
         ("Client-B의 프로젝트 목록", "set", _linked(cb, "HAS_PROJECT")),
-        ("Client-C 담당자 누구야?", "set", _linked(cc, "MANAGES_ACCOUNT", reverse=True)),
+        # Client-C는 담당자가 없어 기대값이 빈 집합이었다 → 0건 반환으로 자동 통과하는
+        # 공허한 문항이라 담당자 5명이 있는 Client-B로 교체했다.
+        ("Client-B 담당자 누구야?", "set", _linked(cb, "MANAGES_ACCOUNT", reverse=True)),
         ("진행중인 프로젝트 리드하는 직원", "set", leads_in_progress),
         ("이슈 제일 많은 제품", "top1", _degree_top("REPORTED_ISSUE", "product")),
         ("장애가 가장 잦은 제품은?", "top1", _degree_top("REPORTED_ISSUE", "product")),
         ("고객을 제일 많이 맡은 직원", "top1", _degree_top("MANAGES_ACCOUNT", "employee")),
         ("가장 많은 거래처를 관리하는 사람", "top1", _degree_top("MANAGES_ACCOUNT", "employee")),
+
+        # ── 아래는 코드리뷰에서 나온 결함들의 회귀 방지용 ────────────────────
+        # rank도 neighbors와 같은 계약 상태 조건을 써야 한다. 전체 기준으로 세면
+        # Client-T 단독 1위지만, 유효 계약만 세면 5개사 공동 1위다.
+        ("제품을 가장 많이 쓰는 고객사는?", "top1", _degree_top("USES", "client", where=ACTIVE)),
+        # 이름이 여러 노드에 걸리면 임의로 고르지 않고 되물어야 한다.
+        ("재원이 담당하는 고객사는?", "error", "ambiguous_entity"),
+        # HAS_PROJECT는 관계 키워드가 없어 rank·scan에서 도달할 수 없었다.
+        ("프로젝트가 가장 많은 고객사는?", "top1", _degree_top("HAS_PROJECT", "client")),
+        # 출발 개체와 같은 유형을 묻는 질문 — 2홉으로 풀려야 한다.
+        ("Client-A의 담당자가 맡은 다른 고객사는?", "set", _two_hop_same_type(ca, "MANAGES_ACCOUNT")),
+        # 3홉이 필요한 질문은 답할 수 없다. 빈 결과를 조용히 주지 말고 한계를 밝혀야 한다.
+        ("경영지원팀 직원이 담당하는 고객사의 프로젝트는?", "limit", None),
     ]
 
 
 def evaluate() -> None:
+    cases = _cases()
+    # 기대값이 빈 집합이면 0건 반환으로 자동 통과해 아무것도 검증하지 못한다.
+    # 그런 문항이 다시 섞여 들어오지 않도록 여기서 막는다.
+    vacuous = [q for q, kind, exp in cases if kind == "set" and not exp]
+    assert not vacuous, f"기대값이 빈 집합인 문항: {vacuous}"
+
     tally: collections.Counter[str] = collections.Counter()
-    for question, kind, expected in _cases():
+    for question, kind, expected in cases:
         result = knowledge_graph_query(question, top_k=30)
         got = [r["id"] for r in result["results"]]
 
-        if result.get("error"):
+        if kind == "error":
+            grade = "정확" if result.get("error") == expected else "오답"
+            note = f"{result.get('error')} / 후보 {result.get('candidates') or result.get('suggestions')}"
+        elif kind == "limit":
+            # 답할 수 없는 질문 — 빈 결과와 함께 탐색 한계를 밝혀야 통과
+            grade = "정확" if not got and result.get("max_hops") else "오답"
+            note = f"반환 {len(got)}건 / max_hops={result.get('max_hops')}"
+        elif result.get("error"):
             grade, note = "오답", result["error"]
         elif kind == "top1":
-            grade = "정확" if got and got[0] in expected else "오답"
-            note = f"1위={got[0] if got else '없음'} / 대상유형={result.get('target_type')}"
+            tied = expected
+            grade = "정확" if got and got[0] in tied else "오답"
+            # 공동 1위는 tied_top으로 알려야 한다
+            if grade == "정확" and len(tied) > 1 and len(result.get("tied_top", [])) != len(tied):
+                grade, note = "오답", f"공동 1위 {len(tied)}건을 tied_top으로 알리지 않음"
+            else:
+                note = f"1위={got[0] if got else '없음'}" + (f" (공동 {len(tied)}건)" if len(tied) > 1 else "")
         elif set(got) == expected:
             grade, note = "정확", f"{len(got)}건"
         elif expected and expected <= set(got):

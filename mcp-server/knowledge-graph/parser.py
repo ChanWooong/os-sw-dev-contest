@@ -157,12 +157,12 @@ def parse(question: str, graph: KnowledgeGraph) -> tuple[Slots, Node | None]:
             break
 
     # 5) 대상 유형 — 문장 뒤쪽에 나온 것이 묻는 대상이다(한국어 어순).
-    #    출발 개체 자신의 유형은 후보에서 제외한다("Product-D1 제품과 관련된 프로젝트").
+    #    출발 개체와 같은 유형도 후보로 둔다. "Client-A의 담당자가 맡은 다른 고객사"처럼
+    #    같은 유형을 묻는 질문이 있고, 이 스키마에는 같은 유형을 잇는 관계가 없어
+    #    자연히 2홉 경로로 풀린다. 제외해 버리면 엉뚱한 유형을 답하게 된다.
     anchor_type = anchor.type if anchor else None
     best: tuple[int, str] | None = None
     for node_type, words in TYPE_KEYWORDS:
-        if node_type == anchor_type:
-            continue
         for w in words:
             pos = text.rfind(w)
             if pos >= 0 and (best is None or pos > best[0]):
@@ -175,8 +175,11 @@ def parse(question: str, graph: KnowledgeGraph) -> tuple[Slots, Node | None]:
         for w in words:
             text = text.replace(w, " ")
 
-    # 6) 관계 확정 — 후보가 여럿이면 출발 개체·대상 유형과 맞는 것을 고른다
+    # 6) 관계 확정 — 후보가 여럿이면 출발 개체·대상 유형과 맞는 것을 고른다.
+    #    관계어가 아예 없으면 언급된 유형 조합으로 추론한다.
     slots.relation = _resolve_relation(candidates, anchor_type, slots.target_type, mentioned)
+    if slots.relation is None:
+        slots.relation = _infer_relation(anchor_type, slots.target_type, mentioned)
 
     # 7) 남은 낱말 중 개체처럼 보이는 것 — 개체를 못 찾았을 때의 진단용
     if anchor is None:
@@ -218,6 +221,27 @@ def _resolve_relation(
     # 어느 후보도 문맥과 맞지 않으면 관계를 비운다. 잘못 고정하면 결과가
     # 빈 배열이 되지만, 비워두면 이웃 전체를 훑어 답을 포함할 여지가 남는다.
     return best if score(best) >= 0 else None
+
+
+def _infer_relation(anchor_type: str | None, target_type: str | None, mentioned: set[str]) -> str | None:
+    """관계를 가리키는 낱말이 없을 때, 언급된 유형 조합으로 관계를 좁힌다.
+
+    "프로젝트가 가장 많은 고객사"에는 관계어가 없지만 client와 project를 잇는 관계는
+    HAS_PROJECT 하나뿐이라 특정된다. 이 추론이 없으면 7종 중 HAS_PROJECT만
+    rank·scan에서 도달할 수 없다(neighbors는 관계 없이도 이웃을 훑어 가려져 있었다).
+
+    후보가 둘 이상이면(client-product를 잇는 USES와 REPORTED_ISSUE처럼) 비워 둔다 —
+    찍는 것보다 넓게 훑는 편이 안전하다.
+    """
+    if target_type is None:
+        return None
+    known = set(mentioned) | ({anchor_type} if anchor_type else set())
+    hits = {
+        relation
+        for relation, endpoints in REL_ENDPOINTS.items()
+        if target_type in endpoints and set(endpoints) <= known
+    }
+    return hits.pop() if len(hits) == 1 else None
 
 
 def _extract_entity(text: str, graph: KnowledgeGraph) -> tuple[Node | None, str]:
